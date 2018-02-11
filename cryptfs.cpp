@@ -1608,26 +1608,25 @@ static int cryptfs_restart_internal(int restart_main)
     /* Now that the framework is shutdown, we should be able to umount()
      * the tmpfs filesystem, and mount the real one.
      */
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_NEW)
+#if defined(CONFIG_HW_DISK_ENCRYPTION)
+#if defined(CONFIG_HW_DISK_ENCRYPT_NEW)
     if (is_ice_enabled()) {
-
         fs_mgr_get_crypt_info(fstab, 0, blkdev, sizeof(blkdev));
-
         if (set_ice_param(START_ENCDEC)) {
              SLOGE("Failed to set ICE data");
              rc = -1;
              goto error;
         }
     }
-    else {
-        property_get("ro.crypto.fs_crypto_blkdev", blkdev, "");
-        if (strlen(blkdev) == 0) {
-             SLOGE("fs_crypto_blkdev not set\n");
-             goto error;
-        }
-        if ((rc = wait_and_unmount(DATA_MNT_POINT, true)))
-             goto error;
+#else
+    property_get("ro.crypto.fs_crypto_blkdev", blkdev, "");
+    if (strlen(blkdev) == 0) {
+        SLOGE("fs_crypto_blkdev not set\n");
+        goto error;
     }
+    if ((rc = wait_and_unmount(DATA_MNT_POINT, true)))
+        goto error;
+#endif
 #else
     property_get("ro.crypto.fs_crypto_blkdev", blkdev, "");
     if (strlen(blkdev) == 0) {
@@ -1812,42 +1811,15 @@ static int test_mount_hw_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
     }
     else {
       if (is_ice_enabled()) {
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-        struct encdec_config_t conf;
-        unsigned long st_sec = 0;
-        int fd = -1;
-
-        fd = open(real_blkdev, O_RDONLY|O_CLOEXEC);
-        if (fd == -1) {
-             SLOGE("Cannot open block device %s\n", real_blkdev);
-             goto errout;
-        }
-
-        get_blkdev_start_sector(fd, &st_sec);
-        if (st_sec == 0) {
-             SLOGE("Cannot get start of block device %s\n", real_blkdev);
-             goto errout;
-        }
-
-        conf.start_sector = st_sec;
-        conf.fs_size = crypt_ftr->fs_size;
-        conf.index = key_index;
-        strlcpy(conf.mode, (char*)crypt_ftr->crypto_type_name, MAX_CRYPTO_TYPE_NAME_LEN);
-
-        if (set_encdec_param(conf)) {
-             SLOGE("failed to set sector = %lu", st_sec);
-                goto errout;
-        }
-#else
-        if (create_crypto_blk_dev(crypt_ftr, decrypted_master_key,
+#ifndef CONFIG_HW_DISK_ENCRYPT_NEW
+        if (create_crypto_blk_dev(crypt_ftr, (unsigned char*)&key_index,
                             real_blkdev, crypto_blkdev, label)) {
           SLOGE("Error creating decrypted block device");
           rc = -1;
           goto errout;
         }
 #endif
-      }
-      else {
+      } else {
         if (create_crypto_blk_dev(crypt_ftr, decrypted_master_key,
                             real_blkdev, crypto_blkdev, label)) {
           SLOGE("Error creating decrypted block device");
@@ -1869,8 +1841,7 @@ static int test_mount_hw_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
 #ifdef CONFIG_HW_DISK_ENCRYPT_NEW
     if (!is_ice_enabled())
 #endif
-      property_set("ro.crypto.fs_crypto_blkdev", crypto_blkdev);
-
+    property_set("ro.crypto.fs_crypto_blkdev", crypto_blkdev);
     master_key_saved = 1;
   }
 
@@ -2498,10 +2469,6 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
 #ifdef CONFIG_HW_DISK_ENCRYPTION
     unsigned char newpw[32];
     int key_index = 0;
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-    unsigned long st_sec = 0;
-    struct encdec_config_t conf;
-#endif
 #endif
     int index = 0;
 
@@ -2567,13 +2534,6 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
         SLOGE("Cannot get size of block device %s\n", real_blkdev);
         goto error_unencrypted;
     }
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_NEW)
-    get_blkdev_start_sector(fd, &st_sec);
-    if (st_sec == 0) {
-        SLOGE("Cannot get start of block device %s\n", real_blkdev);
-        goto error_unencrypted;
-    }
-#endif
     close(fd);
 
     /* If doing inplace encryption, make sure the orig fs doesn't include the crypto footer */
@@ -2732,19 +2692,6 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
 
         crypt_ftr.flags |= CRYPT_ASCII_PASSWORD_UPDATED;
         put_crypt_ftr_and_key(&crypt_ftr);
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-        if (is_ice_enabled()) {
-            conf.start_sector = st_sec;
-            conf.fs_size = crypt_ftr.fs_size;
-            conf.index = key_index;
-            strlcpy(conf.mode, (char*)crypt_ftr.crypto_type_name, MAX_CRYPTO_TYPE_NAME_LEN);
-            SLOGD("start sector = %lu", st_sec);
-            if (set_encdec_param(conf)) {
-                SLOGE("failed to set sector = %lu", st_sec);
-                goto error_shutting_down;
-            }
-        }
-#endif
     }
 #endif
 
