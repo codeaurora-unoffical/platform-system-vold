@@ -1560,20 +1560,19 @@ static void cryptfs_trigger_restart_min_framework()
 /* returns < 0 on failure */
 static int cryptfs_restart_internal(int restart_main)
 {
-    char blkdev[MAXPATHLEN];
+    char crypto_blkdev[MAXPATHLEN];
     int rc = -1;
     static int restart_successful = 0;
-    int retries = RETRY_MOUNT_ATTEMPTS;
-    int mount_rc;
+
     /* Validate that it's OK to call this routine */
     if (! master_key_saved) {
         SLOGE("Encrypted filesystem not validated, aborting");
-        return rc;
+        return -1;
     }
 
     if (restart_successful) {
         SLOGE("System already restarted with encrypted disk, aborting");
-        return rc;
+        return -1;
     }
 
     if (restart_main) {
@@ -1608,46 +1607,28 @@ static int cryptfs_restart_internal(int restart_main)
     /* Now that the framework is shutdown, we should be able to umount()
      * the tmpfs filesystem, and mount the real one.
      */
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_NEW)
-    if (is_ice_enabled()) {
 
-        fs_mgr_get_crypt_info(fstab, 0, blkdev, sizeof(blkdev));
-
-        if (set_ice_param(START_ENCDEC)) {
-             SLOGE("Failed to set ICE data");
-             rc = -1;
-             goto error;
-        }
-    }
-    else {
-        property_get("ro.crypto.fs_crypto_blkdev", blkdev, "");
-        if (strlen(blkdev) == 0) {
-             SLOGE("fs_crypto_blkdev not set\n");
-             goto error;
-        }
-        if ((rc = wait_and_unmount(DATA_MNT_POINT, true)))
-             goto error;
-    }
-#else
-    property_get("ro.crypto.fs_crypto_blkdev", blkdev, "");
-    if (strlen(blkdev) == 0) {
+    property_get("ro.crypto.fs_crypto_blkdev", crypto_blkdev, "");
+    if (strlen(crypto_blkdev) == 0) {
         SLOGE("fs_crypto_blkdev not set\n");
-        goto error;
+        return -1;
     }
-    if ((rc = wait_and_unmount(DATA_MNT_POINT, true)))
-        goto error;
-#endif
+
+    if (! (rc = wait_and_unmount(DATA_MNT_POINT, true)) ) {
         /* If ro.crypto.readonly is set to 1, mount the decrypted
          * filesystem readonly.  This is used when /data is mounted by
          * recovery mode.
          */
-
         char ro_prop[PROPERTY_VALUE_MAX];
         property_get("ro.crypto.readonly", ro_prop, "");
         if (strlen(ro_prop) > 0 && atoi(ro_prop)) {
             struct fstab_rec* rec = fs_mgr_get_entry_for_mount_point(fstab, DATA_MNT_POINT);
             rec->flags |= MS_RDONLY;
         }
+
+        /* If that succeeded, then mount the decrypted filesystem */
+        int retries = RETRY_MOUNT_ATTEMPTS;
+        int mount_rc;
 
         /*
          * fs_mgr_do_mount runs fsck. Use setexeccon to run trusted
@@ -1658,14 +1639,14 @@ static int cryptfs_restart_internal(int restart_main)
             return -1;
         }
         while ((mount_rc = fs_mgr_do_mount(fstab, DATA_MNT_POINT,
-                                           blkdev, 0))
+                                           crypto_blkdev, 0))
                != 0) {
             if (mount_rc == FS_MGR_DOMNT_BUSY) {
                 /* TODO: invoke something similar to
                    Process::killProcessWithOpenFiles(DATA_MNT_POINT,
                                    retries > RETRY_MOUNT_ATTEMPT/2 ? 1 : 2 ) */
                 SLOGI("Failed to mount %s because it is busy - waiting",
-                      blkdev);
+                      crypto_blkdev);
                 if (--retries) {
                     sleep(RETRY_MOUNT_DELAY_SECONDS);
                 } else {
@@ -1711,11 +1692,12 @@ static int cryptfs_restart_internal(int restart_main)
 
         /* Give it a few moments to get started */
         sleep(1);
+    }
 
     if (rc == 0) {
         restart_successful = 1;
     }
-error:
+
     return rc;
 }
 
@@ -1812,42 +1794,13 @@ static int test_mount_hw_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
     }
     else {
       if (is_ice_enabled()) {
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-        struct encdec_config_t conf;
-        unsigned long st_sec = 0;
-        int fd = -1;
-
-        fd = open(real_blkdev, O_RDONLY|O_CLOEXEC);
-        if (fd == -1) {
-             SLOGE("Cannot open block device %s\n", real_blkdev);
-             goto errout;
-        }
-
-        get_blkdev_start_sector(fd, &st_sec);
-        if (st_sec == 0) {
-             SLOGE("Cannot get start of block device %s\n", real_blkdev);
-             goto errout;
-        }
-
-        conf.start_sector = st_sec;
-        conf.fs_size = crypt_ftr->fs_size;
-        conf.index = key_index;
-        strlcpy(conf.mode, (char*)crypt_ftr->crypto_type_name, MAX_CRYPTO_TYPE_NAME_LEN);
-
-        if (set_encdec_param(conf)) {
-             SLOGE("failed to set sector = %lu", st_sec);
-                goto errout;
-        }
-#else
-        if (create_crypto_blk_dev(crypt_ftr, decrypted_master_key,
+        if (create_crypto_blk_dev(crypt_ftr, (unsigned char*)&key_index,
                             real_blkdev, crypto_blkdev, label)) {
           SLOGE("Error creating decrypted block device");
           rc = -1;
           goto errout;
         }
-#endif
-      }
-      else {
+      } else {
         if (create_crypto_blk_dev(crypt_ftr, decrypted_master_key,
                             real_blkdev, crypto_blkdev, label)) {
           SLOGE("Error creating decrypted block device");
@@ -1866,11 +1819,7 @@ static int test_mount_hw_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
 
     /* Save the name of the crypto block device
      * so we can mount it when restarting the framework. */
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-    if (!is_ice_enabled())
-#endif
-      property_set("ro.crypto.fs_crypto_blkdev", crypto_blkdev);
-
+    property_set("ro.crypto.fs_crypto_blkdev", crypto_blkdev);
     master_key_saved = 1;
   }
 
@@ -2498,10 +2447,6 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
 #ifdef CONFIG_HW_DISK_ENCRYPTION
     unsigned char newpw[32];
     int key_index = 0;
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-    unsigned long st_sec = 0;
-    struct encdec_config_t conf;
-#endif
 #endif
     int index = 0;
 
@@ -2567,13 +2512,6 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
         SLOGE("Cannot get size of block device %s\n", real_blkdev);
         goto error_unencrypted;
     }
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_NEW)
-    get_blkdev_start_sector(fd, &st_sec);
-    if (st_sec == 0) {
-        SLOGE("Cannot get start of block device %s\n", real_blkdev);
-        goto error_unencrypted;
-    }
-#endif
     close(fd);
 
     /* If doing inplace encryption, make sure the orig fs doesn't include the crypto footer */
@@ -2732,19 +2670,6 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
 
         crypt_ftr.flags |= CRYPT_ASCII_PASSWORD_UPDATED;
         put_crypt_ftr_and_key(&crypt_ftr);
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-        if (is_ice_enabled()) {
-            conf.start_sector = st_sec;
-            conf.fs_size = crypt_ftr.fs_size;
-            conf.index = key_index;
-            strlcpy(conf.mode, (char*)crypt_ftr.crypto_type_name, MAX_CRYPTO_TYPE_NAME_LEN);
-            SLOGD("start sector = %lu", st_sec);
-            if (set_encdec_param(conf)) {
-                SLOGE("failed to set sector = %lu", st_sec);
-                goto error_shutting_down;
-            }
-        }
-#endif
     }
 #endif
 
@@ -2790,12 +2715,8 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
     decrypt_master_key(passwd, decrypted_master_key, &crypt_ftr, 0, 0);
 #ifdef CONFIG_HW_DISK_ENCRYPTION
     if (is_hw_disk_encryption((char*)crypt_ftr.crypto_type_name) && is_ice_enabled())
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-      strlcpy(crypto_blkdev, real_blkdev, sizeof(crypto_blkdev));
-#else
       create_crypto_blk_dev(&crypt_ftr, (unsigned char*)&key_index, real_blkdev, crypto_blkdev,
                           CRYPTO_BLOCK_DEVICE);
-#endif
     else
       create_crypto_blk_dev(&crypt_ftr, decrypted_master_key, real_blkdev, crypto_blkdev,
                           CRYPTO_BLOCK_DEVICE);
@@ -2808,12 +2729,6 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
     rc = 0;
     if (previously_encrypted_upto) {
         __le8 hash_first_block[SHA256_DIGEST_LENGTH];
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_NEW)
-        if (set_ice_param(START_ENCDEC)) {
-	   SLOGE("Failed to set ICE data");
-           goto error_shutting_down;
-	}
-#endif
         rc = cryptfs_SHA256_fileblock(crypto_blkdev, hash_first_block);
 
         if (!rc && memcmp(hash_first_block, crypt_ftr.hash_first_block,
@@ -2822,23 +2737,13 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
             rc = -1;
         }
     }
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_NEW)
-    if (set_ice_param(START_ENC)) {
-        SLOGE("Failed to set ICE data");
-        goto error_shutting_down;
-    }
-#endif
+
     if (!rc) {
         rc = cryptfs_enable_all_volumes(&crypt_ftr, how,
                                         crypto_blkdev, real_blkdev,
                                         previously_encrypted_upto);
     }
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_NEW)
-    if (set_ice_param(START_ENCDEC)) {
-        SLOGE("Failed to set ICE data");
-        goto error_shutting_down;
-    }
-#endif
+
     /* Calculate checksum if we are not finished */
     if (!rc && how == CRYPTO_ENABLE_INPLACE
             && crypt_ftr.encrypted_upto != crypt_ftr.fs_size) {
@@ -2851,12 +2756,7 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, const char *passwd,
     }
 
     /* Undo the dm-crypt mapping whether we succeed or not */
-#if defined(CONFIG_HW_DISK_ENCRYPTION) && defined(CONFIG_HW_DISK_ENCRYPT_NEW)
-    if (!is_ice_enabled())
-       delete_crypto_blk_dev(CRYPTO_BLOCK_DEVICE);
-#else
     delete_crypto_blk_dev(CRYPTO_BLOCK_DEVICE);
-#endif
 
     if (! rc) {
         /* Success */
