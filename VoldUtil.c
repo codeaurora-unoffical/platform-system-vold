@@ -22,10 +22,3 @@ void get_blkdev_size(int fd, unsigned long* nr_sec) {
     *nr_sec = 0;
   }
 }
-#ifdef CONFIG_HW_DISK_ENCRYPT_NEW
-void get_blkdev_start_sector(int fd, unsigned long* st_sec) {
-  if ((ioctl(fd, BLKGETSTPART, st_sec)) == -1) {
-    *st_sec = 0;
-  }
-}
-#endif
