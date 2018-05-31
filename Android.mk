@@ -101,6 +101,10 @@ ifeq ($(TARGET_HW_DISK_ENCRYPTION),true)
   vold_cflags += -DCONFIG_HW_DISK_ENCRYPTION
 endif
 
+ifeq ($(TARGET_HW_DISK_ENCRYPT_NEW),true)
+  vold_cflags += -DCONFIG_HW_DISK_ENCRYPT_NEW
+endif
+
 include $(CLEAR_VARS)
 
 LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
