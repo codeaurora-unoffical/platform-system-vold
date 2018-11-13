@@ -27,8 +27,13 @@
 #include <keyutils.h>
 
 #include "KeyStorage.h"
+#include "Ext4Crypt.h"
 #include "Utils.h"
 
+#define MAX_USER_ID 0xFFFFFFFF
+
+using android::hardware::keymaster::V4_0::KeyFormat;
+using android::vold::KeyType;
 namespace android {
 namespace vold {
 
@@ -88,12 +93,7 @@ static bool fillKey(const KeyBuffer& key, ext4_encryption_key* ext4_key) {
     return true;
 }
 
-static char const* const NAME_PREFIXES[] = {
-    "ext4",
-    "f2fs",
-    "fscrypt",
-    nullptr
-};
+static char const* const NAME_PREFIXES[] = {"ext4", "f2fs", "fscrypt", nullptr};
 
 static std::string keyname(const std::string& prefix, const std::string& raw_ref) {
     std::ostringstream o;
@@ -119,10 +119,17 @@ static bool e4cryptKeyring(key_serial_t* device_keyring) {
 bool installKey(const KeyBuffer& key, std::string* raw_ref) {
     // Place ext4_encryption_key into automatically zeroing buffer.
     KeyBuffer ext4KeyBuffer(sizeof(ext4_encryption_key));
-    ext4_encryption_key &ext4_key = *reinterpret_cast<ext4_encryption_key*>(ext4KeyBuffer.data());
+    ext4_encryption_key& ext4_key = *reinterpret_cast<ext4_encryption_key*>(ext4KeyBuffer.data());
 
     if (!fillKey(key, &ext4_key)) return false;
-    *raw_ref = generateKeyRef(ext4_key.raw, ext4_key.size);
+    if (is_wrapped_key_supported()) {
+        /* When wrapped key is supported, only the first 32 bytes are
+           the same per boot. The second 32 bytes can change as the ephemeral
+           key is different. */
+        *raw_ref = generateKeyRef(ext4_key.raw, (ext4_key.size)/2);
+    } else {
+        *raw_ref = generateKeyRef(ext4_key.raw, ext4_key.size);
+    }
     key_serial_t device_keyring;
     if (!e4cryptKeyring(&device_keyring)) return false;
     for (char const* const* name_prefix = NAME_PREFIXES; *name_prefix != nullptr; name_prefix++) {
@@ -163,19 +170,32 @@ bool evictKey(const std::string& raw_ref) {
 
 bool retrieveAndInstallKey(bool create_if_absent, const KeyAuthentication& key_authentication,
                            const std::string& key_path, const std::string& tmp_path,
-                           std::string* key_ref) {
+                           std::string* key_ref, bool wrapped_key_supported) {
     KeyBuffer key;
     if (pathExists(key_path)) {
         LOG(DEBUG) << "Key exists, using: " << key_path;
         if (!retrieveKey(key_path, key_authentication, &key)) return false;
     } else {
         if (!create_if_absent) {
-           LOG(ERROR) << "No key found in " << key_path;
-           return false;
+            LOG(ERROR) << "No key found in " << key_path;
+            return false;
         }
         LOG(INFO) << "Creating new key in " << key_path;
-        if (!randomKey(&key)) return false;
+        if (wrapped_key_supported) {
+            if(!generateWrappedKey(MAX_USER_ID, KeyType::DE_SYS, &key)) return false;
+        } else {
+            if (!randomKey(&key)) return false;
+        }
         if (!storeKeyAtomically(key_path, tmp_path, key_authentication, key)) return false;
+    }
+
+    if (wrapped_key_supported) {
+        KeyBuffer ephemeral_wrapped_key;
+        if (!getEphemeralWrappedKey(KeyFormat::RAW, key, &ephemeral_wrapped_key)) {
+            LOG(ERROR) << "Failed to export key in retrieveAndInstallKey";
+            return false;
+        }
+        key = std::move(ephemeral_wrapped_key);
     }
 
     if (!installKey(key, key_ref)) {
@@ -185,20 +205,19 @@ bool retrieveAndInstallKey(bool create_if_absent, const KeyAuthentication& key_a
     return true;
 }
 
-bool retrieveKey(bool create_if_absent, const std::string& key_path,
-                 const std::string& tmp_path, KeyBuffer* key) {
+bool retrieveKey(bool create_if_absent, const std::string& key_path, const std::string& tmp_path,
+                 KeyBuffer* key) {
     if (pathExists(key_path)) {
         LOG(DEBUG) << "Key exists, using: " << key_path;
         if (!retrieveKey(key_path, kEmptyAuthentication, key)) return false;
     } else {
         if (!create_if_absent) {
-           LOG(ERROR) << "No key found in " << key_path;
-           return false;
+            LOG(ERROR) << "No key found in " << key_path;
+            return false;
         }
         LOG(INFO) << "Creating new key in " << key_path;
         if (!randomKey(key)) return false;
-        if (!storeKeyAtomically(key_path, tmp_path,
-                kEmptyAuthentication, *key)) return false;
+        if (!storeKeyAtomically(key_path, tmp_path, kEmptyAuthentication, *key)) return false;
     }
     return true;
 }

@@ -24,18 +24,20 @@
 
 #include <android-base/chrono_utils.h>
 #include <android-base/file.h>
-#include <android-base/stringprintf.h>
 #include <android-base/logging.h>
+#include <android-base/stringprintf.h>
+#include <android-base/strings.h>
+#include <android/hardware/health/storage/1.0/IStorage.h>
 #include <fs_mgr.h>
-#include <private/android_filesystem_config.h>
 #include <hardware_legacy/power.h>
+#include <private/android_filesystem_config.h>
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <fcntl.h>
 
 using android::base::Basename;
 using android::base::ReadFileToString;
@@ -43,6 +45,11 @@ using android::base::Realpath;
 using android::base::StringPrintf;
 using android::base::Timer;
 using android::base::WriteStringToFile;
+using android::hardware::Return;
+using android::hardware::Void;
+using android::hardware::health::storage::V1_0::IStorage;
+using android::hardware::health::storage::V1_0::IGarbageCollectCallback;
+using android::hardware::health::storage::V1_0::Result;
 
 namespace android {
 namespace vold {
@@ -73,8 +80,7 @@ static IdleMaintStats idle_maint_stat(IdleMaintStats::kStopped);
 static std::condition_variable cv_abort, cv_stop;
 static std::mutex cv_m;
 
-static void addFromVolumeManager(std::list<std::string>* paths,
-                                 PathTypes path_type) {
+static void addFromVolumeManager(std::list<std::string>* paths, PathTypes path_type) {
     VolumeManager* vm = VolumeManager::Instance();
     std::list<std::string> privateIds;
     vm->listVolumes(VolumeBase::Type::kPrivate, privateIds);
@@ -88,11 +94,9 @@ static void addFromVolumeManager(std::list<std::string>* paths,
                 const std::string& fs_type = vol->getFsType();
                 if (fs_type == "f2fs" && (Realpath(vol->getRawDmDevPath(), &gc_path) ||
                                           Realpath(vol->getRawDevPath(), &gc_path))) {
-                    paths->push_back(std::string("/sys/fs/") + fs_type +
-                                     "/" + Basename(gc_path));
+                    paths->push_back(std::string("/sys/fs/") + fs_type + "/" + Basename(gc_path));
                 }
             }
-
         }
     }
 }
@@ -100,7 +104,7 @@ static void addFromVolumeManager(std::list<std::string>* paths,
 static void addFromFstab(std::list<std::string>* paths, PathTypes path_type) {
     std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)> fstab(fs_mgr_read_fstab_default(),
                                                                fs_mgr_free_fstab);
-    struct fstab_rec *prev_rec = NULL;
+    struct fstab_rec* prev_rec = NULL;
 
     for (int i = 0; i < fstab->num_entries; i++) {
         auto fs_type = std::string(fstab->recs[i].fs_type);
@@ -131,10 +135,11 @@ static void addFromFstab(std::list<std::string>* paths, PathTypes path_type) {
         } else if (path_type == PathTypes::kBlkDevice) {
             std::string gc_path;
             if (std::string(fstab->recs[i].fs_type) == "f2fs" &&
-                Realpath(android::vold::BlockDeviceForPath(
-                    std::string(fstab->recs[i].mount_point) + "/"), &gc_path)) {
-                paths->push_back(std::string("/sys/fs/") + fstab->recs[i].fs_type +
-                                 "/" + Basename(gc_path));
+                Realpath(
+                    android::vold::BlockDeviceForPath(std::string(fstab->recs[i].mount_point) + "/"),
+                    &gc_path)) {
+                paths->push_back(std::string("/sys/fs/") + fstab->recs[i].fs_type + "/" +
+                                 Basename(gc_path));
             }
         }
 
@@ -177,8 +182,8 @@ void Trim(const android::sp<android::os::IVoldTaskListener>& listener) {
             }
         } else {
             nsecs_t time = systemTime(SYSTEM_TIME_BOOTTIME) - start;
-            LOG(INFO) << "Trimmed " << range.len << " bytes on " << path
-                    << " in " << nanoseconds_to_milliseconds(time) << "ms";
+            LOG(INFO) << "Trimmed " << range.len << " bytes on " << path << " in "
+                      << nanoseconds_to_milliseconds(time) << "ms";
             extras.putLong(String16("bytes"), range.len);
             extras.putLong(String16("time"), time);
             if (listener) {
@@ -223,8 +228,8 @@ static bool waitForGc(const std::list<std::string>& paths) {
         }
 
         lk.lock();
-        aborted = cv_abort.wait_for(lk, 10s, []{
-            return idle_maint_stat == IdleMaintStats::kAbort;});
+        aborted =
+            cv_abort.wait_for(lk, 10s, [] { return idle_maint_stat == IdleMaintStats::kAbort; });
         lk.unlock();
     }
 
@@ -257,10 +262,10 @@ static int stopGc(const std::list<std::string>& paths) {
     return android::OK;
 }
 
-static void runDevGc(void) {
+static void runDevGcFstab(void) {
     std::unique_ptr<fstab, decltype(&fs_mgr_free_fstab)> fstab(fs_mgr_read_fstab_default(),
                                                                fs_mgr_free_fstab);
-    struct fstab_rec *rec = NULL;
+    struct fstab_rec* rec = NULL;
 
     for (int i = 0; i < fstab->num_entries; i++) {
         if (fs_mgr_has_sysfs_path(&fstab->recs[i])) {
@@ -284,7 +289,7 @@ static void runDevGc(void) {
             PLOG(WARNING) << "Reading manual_gc failed in " << path;
             break;
         }
-
+        require = android::base::Trim(require);
         if (require == "" || require == "off" || require == "disabled") {
             LOG(DEBUG) << "No more to do Dev GC";
             break;
@@ -307,6 +312,57 @@ static void runDevGc(void) {
         PLOG(WARNING) << "Stop Dev GC failed on " << path;
     }
     return;
+}
+
+class GcCallback : public IGarbageCollectCallback {
+  public:
+    Return<void> onFinish(Result result) override {
+        std::unique_lock<std::mutex> lock(mMutex);
+        mFinished = true;
+        mResult = result;
+        lock.unlock();
+        mCv.notify_all();
+        return Void();
+    }
+    void wait(uint64_t seconds) {
+        std::unique_lock<std::mutex> lock(mMutex);
+        mCv.wait_for(lock, std::chrono::seconds(seconds), [this] { return mFinished; });
+
+        if (!mFinished) {
+            LOG(WARNING) << "Dev GC on HAL timeout";
+        } else if (mResult != Result::SUCCESS) {
+            LOG(WARNING) << "Dev GC on HAL failed with " << toString(mResult);
+        } else {
+            LOG(INFO) << "Dev GC on HAL successful";
+        }
+    }
+
+  private:
+    std::mutex mMutex;
+    std::condition_variable mCv;
+    bool mFinished{false};
+    Result mResult{Result::UNKNOWN_ERROR};
+};
+
+static void runDevGcOnHal(sp<IStorage> service) {
+    LOG(DEBUG) << "Start Dev GC on HAL";
+    sp<GcCallback> cb = new GcCallback();
+    auto ret = service->garbageCollect(DEVGC_TIMEOUT_SEC, cb);
+    if (!ret.isOk()) {
+        LOG(WARNING) << "Cannot start Dev GC on HAL: " << ret.description();
+        return;
+    }
+    cb->wait(DEVGC_TIMEOUT_SEC);
+}
+
+static void runDevGc(void) {
+    auto service = IStorage::getService();
+    if (service != nullptr) {
+        runDevGcOnHal(service);
+    } else {
+        // fallback to legacy code path
+        runDevGcFstab();
+    }
 }
 
 int RunIdleMaint(const android::sp<android::os::IVoldTaskListener>& listener) {
@@ -369,8 +425,7 @@ int AbortIdleMaint(const android::sp<android::os::IVoldTaskListener>& listener) 
         cv_abort.notify_one();
         lk.lock();
         LOG(DEBUG) << "aborting idle maintenance";
-        cv_stop.wait(lk, []{
-            return idle_maint_stat == IdleMaintStats::kStopped;});
+        cv_stop.wait(lk, [] { return idle_maint_stat == IdleMaintStats::kStopped; });
     }
     lk.unlock();
 
