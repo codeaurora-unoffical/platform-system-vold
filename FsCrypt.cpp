@@ -62,6 +62,7 @@
 
 using android::base::StringPrintf;
 using android::base::WriteStringToFile;
+using android::fs_mgr::GetEntryForMountPoint;
 using android::vold::kEmptyAuthentication;
 using android::vold::KeyBuffer;
 using android::vold::Keymaster;
@@ -176,27 +177,12 @@ static void fixate_user_ce_key(const std::string& directory_path, const std::str
     auto const current_path = get_ce_key_current_path(directory_path);
     if (to_fix != current_path) {
         LOG(DEBUG) << "Renaming " << to_fix << " to " << current_path;
-        android::base::unique_fd fd(TEMP_FAILURE_RETRY(
-            open(to_fix.c_str(), O_RDONLY | O_CLOEXEC)));
-        if (fd == -1) {
-            PLOG(ERROR) << "Failed to open " << to_fix;
-            return;
-        }
-        if (fsync(fd) == -1) {
-            if (errno == EROFS || errno == EINVAL) {
-                PLOG(WARNING) << "Skip fsync " << to_fix
-                              << " on a file system does not support synchronization";
-            } else {
-                PLOG(ERROR) << "Failed to fsync " << to_fix;
-                unlink(to_fix.c_str());
-                return;
-            }
-        }
         if (rename(to_fix.c_str(), current_path.c_str()) != 0) {
             PLOG(WARNING) << "Unable to rename " << to_fix << " to " << current_path;
             return;
         }
     }
+    android::vold::FsyncDirectory(directory_path);
 }
 
 static bool read_and_fixate_user_ce_key(userid_t user_id,
@@ -217,8 +203,7 @@ static bool read_and_fixate_user_ce_key(userid_t user_id,
 }
 
 bool is_wrapped_key_supported() {
-    return fs_mgr_is_wrapped_key_supported(
-        fs_mgr_get_entry_for_mount_point(fstab_default, DATA_MNT_POINT));
+    return GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT)->fs_mgr_flags.wrapped_key;
 }
 
 bool is_wrapped_key_supported_external() {
@@ -342,12 +327,12 @@ static bool lookup_key_ref(const std::map<userid_t, std::string>& key_map, useri
 }
 
 static void get_data_file_encryption_modes(PolicyKeyRef* key_ref) {
-    struct fstab_rec* rec = fs_mgr_get_entry_for_mount_point(fstab_default, DATA_MNT_POINT);
-    char const* contents_mode;
-    char const* filenames_mode;
-    fs_mgr_get_file_encryption_modes(rec, &contents_mode, &filenames_mode);
-    key_ref->contents_mode = contents_mode;
-    key_ref->filenames_mode = filenames_mode;
+    auto entry = GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT);
+    if (entry == nullptr) {
+        return;
+    }
+    key_ref->contents_mode = entry->file_contents_mode;
+    key_ref->filenames_mode = entry->file_names_mode;
 }
 
 static bool ensure_policy(const PolicyKeyRef& key_ref, const std::string& path) {
@@ -502,7 +487,6 @@ static void drop_caches() {
 }
 
 static bool evict_ce_key(userid_t user_id) {
-    s_ce_keys.erase(user_id);
     bool success = true;
     std::string raw_ref;
     // If we haven't loaded the CE key, no need to evict it.
@@ -510,6 +494,23 @@ static bool evict_ce_key(userid_t user_id) {
         success &= android::vold::evictKey(raw_ref);
         drop_caches();
     }
+
+    if(is_wrapped_key_supported()) {
+        KeyBuffer key;
+        key = s_ce_keys[user_id];
+
+        std::string keystr(key.data(), key.size());
+        Keymaster keymaster;
+
+        if (!keymaster) {
+            s_ce_keys.erase(user_id);
+            s_ce_key_raw_refs.erase(user_id);
+            return false;
+        }
+        keymaster.deleteKey(keystr);
+    }
+
+    s_ce_keys.erase(user_id);
     s_ce_key_raw_refs.erase(user_id);
     return success;
 }
@@ -668,6 +669,7 @@ bool fscrypt_add_user_key_auth(userid_t user_id, int serial, const std::string& 
     std::string ce_key_path;
     if (!get_ce_key_new_path(directory_path, paths, &ce_key_path)) return false;
     if (!android::vold::storeKeyAtomically(ce_key_path, user_key_temp, auth, ce_key)) return false;
+    if (!android::vold::FsyncDirectory(directory_path)) return false;
     return true;
 }
 

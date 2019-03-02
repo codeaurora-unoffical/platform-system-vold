@@ -68,12 +68,8 @@ status_t ReadMetadataUntrusted(const std::string& path, std::string* fsType, std
                                std::string* fsLabel);
 
 /* Returns either WEXITSTATUS() status, or a negative errno */
-status_t ForkExecvp(const std::vector<std::string>& args);
-status_t ForkExecvp(const std::vector<std::string>& args, security_context_t context);
-
-status_t ForkExecvp(const std::vector<std::string>& args, std::vector<std::string>& output);
-status_t ForkExecvp(const std::vector<std::string>& args, std::vector<std::string>& output,
-                    security_context_t context);
+status_t ForkExecvp(const std::vector<std::string>& args, std::vector<std::string>* output = nullptr,
+                    security_context_t context = nullptr);
 
 pid_t ForkExecvpAsync(const std::vector<std::string>& args);
 
@@ -131,11 +127,14 @@ bool Readlinkat(int dirfd, const std::string& path, std::string* result);
 /* Checks if Android is running in QEMU */
 bool IsRunningInEmulator();
 
-status_t UnmountTree(const std::string& prefix);
+status_t UnmountTreeWithPrefix(const std::string& prefix);
+status_t UnmountTree(const std::string& mountPoint);
 
 status_t DeleteDirContentsAndDir(const std::string& pathname);
 
 status_t WaitForFile(const char* filename, std::chrono::nanoseconds timeout);
+
+bool FsyncDirectory(const std::string& dirname);
 
 }  // namespace vold
 }  // namespace android
