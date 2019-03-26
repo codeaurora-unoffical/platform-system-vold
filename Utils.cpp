@@ -193,8 +193,50 @@ status_t KillProcessesUsingPath(const std::string& path) {
 }
 
 status_t BindMount(const std::string& source, const std::string& target) {
-    if (::mount(source.c_str(), target.c_str(), "", MS_BIND, NULL)) {
+    if (UnmountTree(target) < 0) {
+        return -errno;
+    }
+    if (TEMP_FAILURE_RETRY(mount(source.c_str(), target.c_str(), nullptr, MS_BIND, nullptr)) < 0) {
         PLOG(ERROR) << "Failed to bind mount " << source << " to " << target;
+        return -errno;
+    }
+    return OK;
+}
+
+status_t Symlink(const std::string& target, const std::string& linkpath) {
+    if (Unlink(linkpath) < 0) {
+        return -errno;
+    }
+    if (TEMP_FAILURE_RETRY(symlink(target.c_str(), linkpath.c_str())) < 0) {
+        PLOG(ERROR) << "Failed to create symlink " << linkpath << " to " << target;
+        return -errno;
+    }
+    return OK;
+}
+
+status_t Unlink(const std::string& linkpath) {
+    if (TEMP_FAILURE_RETRY(unlink(linkpath.c_str())) < 0 && errno != EINVAL && errno != ENOENT) {
+        PLOG(ERROR) << "Failed to unlink " << linkpath;
+        return -errno;
+    }
+    return OK;
+}
+
+status_t CreateDir(const std::string& dir, mode_t mode) {
+    struct stat sb;
+    if (TEMP_FAILURE_RETRY(stat(dir.c_str(), &sb)) == 0) {
+        if (S_ISDIR(sb.st_mode)) {
+            return OK;
+        } else if (TEMP_FAILURE_RETRY(unlink(dir.c_str())) == -1) {
+            PLOG(ERROR) << "Failed to unlink " << dir;
+            return -errno;
+        }
+    } else if (errno != ENOENT) {
+        PLOG(ERROR) << "Failed to stat " << dir;
+        return -errno;
+    }
+    if (TEMP_FAILURE_RETRY(mkdir(dir.c_str(), mode)) == -1 && errno != EEXIST) {
+        PLOG(ERROR) << "Failed to mkdir " << dir;
         return -errno;
     }
     return OK;
@@ -202,12 +244,15 @@ status_t BindMount(const std::string& source, const std::string& target) {
 
 bool FindValue(const std::string& raw, const std::string& key, std::string* value) {
     auto qual = key + "=\"";
-    auto start = raw.find(qual);
-    if (start > 0 && raw[start - 1] != ' ') {
-        start = raw.find(qual, start + 1);
+    size_t start = 0;
+    while (true) {
+        start = raw.find(qual, start);
+        if (start == std::string::npos) return false;
+        if (start == 0 || raw[start - 1] == ' ') {
+            break;
+        }
+        start += 1;
     }
-
-    if (start == std::string::npos) return false;
     start += qual.length();
 
     auto end = raw.find("\"", start);
@@ -797,7 +842,8 @@ status_t UnmountTreeWithPrefix(const std::string& prefix) {
 }
 
 status_t UnmountTree(const std::string& mountPoint) {
-    if (umount2(mountPoint.c_str(), MNT_DETACH)) {
+    if (TEMP_FAILURE_RETRY(umount2(mountPoint.c_str(), MNT_DETACH)) < 0 && errno != EINVAL &&
+        errno != ENOENT) {
         PLOG(ERROR) << "Failed to unmount " << mountPoint;
         return -errno;
     }
@@ -852,6 +898,19 @@ static status_t delete_dir_contents(DIR* dir) {
 }
 
 status_t DeleteDirContentsAndDir(const std::string& pathname) {
+    status_t res = DeleteDirContents(pathname);
+    if (res < 0) {
+        return res;
+    }
+    if (TEMP_FAILURE_RETRY(rmdir(pathname.c_str())) < 0 && errno != ENOENT) {
+        PLOG(ERROR) << "rmdir failed on " << pathname;
+        return -errno;
+    }
+    LOG(VERBOSE) << "Success: rmdir on " << pathname;
+    return OK;
+}
+
+status_t DeleteDirContents(const std::string& pathname) {
     // Shamelessly borrowed from android::installd
     std::unique_ptr<DIR, decltype(&closedir)> dirp(opendir(pathname.c_str()), closedir);
     if (!dirp) {
@@ -861,17 +920,7 @@ status_t DeleteDirContentsAndDir(const std::string& pathname) {
         PLOG(ERROR) << "Failed to opendir " << pathname;
         return -errno;
     }
-    status_t res = delete_dir_contents(dirp.get());
-    if (res < 0) {
-        return res;
-    }
-    dirp.reset(nullptr);
-    if (rmdir(pathname.c_str()) != 0) {
-        PLOG(ERROR) << "rmdir failed on " << pathname;
-        return -errno;
-    }
-    LOG(VERBOSE) << "Success: rmdir on " << pathname;
-    return OK;
+    return delete_dir_contents(dirp.get());
 }
 
 // TODO(118708649): fix duplication with init/util.h
