@@ -1286,9 +1286,8 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
     char encrypted_state[PROPERTY_VALUE_MAX] = {0};
     char progress[PROPERTY_VALUE_MAX] = {0};
     const char *extra_params;
-#else
-    std::vector<std::string> extra_params_vec;
 #endif
+    std::vector<std::string> extra_params_vec;
 
     if ((fd = open("/dev/device-mapper", O_RDWR | O_CLOEXEC)) < 0) {
         SLOGE("Cannot open device-mapper\n");
