@@ -34,6 +34,7 @@
 
 #include <linux/kdev_t.h>
 
+#include <ApexProperties.sysprop.h>
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
 #include <android-base/properties.h>
@@ -118,7 +119,8 @@ VolumeManager::VolumeManager() {
 VolumeManager::~VolumeManager() {}
 
 static bool hasIsolatedStorage() {
-    return GetBoolProperty(kIsolatedStorageSnapshot, GetBoolProperty(kIsolatedStorage, true));
+    return false &&
+           GetBoolProperty(kIsolatedStorageSnapshot, GetBoolProperty(kIsolatedStorage, true));
 }
 
 int VolumeManager::updateVirtualDisk() {
@@ -498,7 +500,8 @@ int VolumeManager::mountPkgSpecificDirsForRunningProcs(
         const std::string& sandboxId = mSandboxIds[appId];
 
         // We purposefully leave the namespace open across the fork
-        unique_fd nsFd(openat(pidFd.get(), "ns/mnt", O_RDONLY));  // not O_CLOEXEC
+        // NOLINTNEXTLINE(android-cloexec-open): Deliberately not O_CLOEXEC
+        unique_fd nsFd(openat(pidFd.get(), "ns/mnt", O_RDONLY));
         if (nsFd.get() < 0) {
             PLOG(WARNING) << "Failed to open namespace for " << de->d_name;
             continue;
@@ -639,8 +642,8 @@ int VolumeManager::handleMountModeInstaller(int mountMode, int obbMountDirFd,
             PLOG(ERROR) << "Failed to access " << obbMountDir << "/" << sandboxId;
             return -errno;
         }
-        const unique_fd fd(
-            TEMP_FAILURE_RETRY(openat(obbMountDirFd, sandboxId.c_str(), O_RDWR | O_CREAT, 0600)));
+        const unique_fd fd(TEMP_FAILURE_RETRY(
+            openat(obbMountDirFd, sandboxId.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600)));
         if (fd.get() < 0) {
             PLOG(ERROR) << "Failed to create " << obbMountDir << "/" << sandboxId;
             return -errno;
@@ -866,6 +869,12 @@ int VolumeManager::prepareSandboxForApp(const std::string& packageName, appid_t 
         // be created when the user starts.
         return 0;
     }
+
+    auto& userPackages = mUserPackages[userId];
+    if (std::find(userPackages.begin(), userPackages.end(), packageName) != userPackages.end()) {
+        return 0;
+    }
+
     LOG(VERBOSE) << "prepareSandboxForApp: " << packageName << ", appId=" << appId
                  << ", sandboxId=" << sandboxId << ", userId=" << userId;
     mUserPackages[userId].push_back(packageName);
@@ -1090,7 +1099,12 @@ int VolumeManager::remountUidLegacy(uid_t uid, int32_t mountMode) {
             mode = "read";
             break;
         case VoldNativeService::REMOUNT_MODE_WRITE:
+        case VoldNativeService::REMOUNT_MODE_LEGACY:
+        case VoldNativeService::REMOUNT_MODE_INSTALLER:
             mode = "write";
+            break;
+        case VoldNativeService::REMOUNT_MODE_FULL:
+            mode = "full";
             break;
         default:
             PLOG(ERROR) << "Unknown mode " << std::to_string(mountMode);
@@ -1106,6 +1120,8 @@ int VolumeManager::remountUidLegacy(uid_t uid, int32_t mountMode) {
     int nsFd;
     struct stat sb;
     pid_t child;
+
+    static bool apexUpdatable = android::sysprop::ApexProperties::updatable().value_or(false);
 
     if (!(dir = opendir("/proc"))) {
         PLOG(ERROR) << "Failed to opendir";
@@ -1151,8 +1167,29 @@ int VolumeManager::remountUidLegacy(uid_t uid, int32_t mountMode) {
             goto next;
         }
 
+        if (apexUpdatable) {
+            std::string exeName;
+            // When ro.apex.bionic_updatable is set to true,
+            // some early native processes have mount namespaces that are different
+            // from that of the init. Therefore, above check can't filter them out.
+            // Since the propagation type of / is 'shared', unmounting /storage
+            // for the early native processes affects other processes including
+            // init. Filter out such processes by skipping if a process is a
+            // non-Java process whose UID is < AID_APP_START. (The UID condition
+            // is required to not filter out child processes spawned by apps.)
+            if (!android::vold::Readlinkat(pidFd, "exe", &exeName)) {
+                PLOG(WARNING) << "Failed to read exe name for " << de->d_name;
+                goto next;
+            }
+            if (!StartsWith(exeName, "/system/bin/app_process") && sb.st_uid < AID_APP_START) {
+                LOG(WARNING) << "Skipping due to native system process";
+                goto next;
+            }
+        }
+
         // We purposefully leave the namespace open across the fork
-        nsFd = openat(pidFd, "ns/mnt", O_RDONLY);  // not O_CLOEXEC
+        // NOLINTNEXTLINE(android-cloexec-open): Deliberately not O_CLOEXEC
+        nsFd = openat(pidFd, "ns/mnt", O_RDONLY);
         if (nsFd < 0) {
             PLOG(WARNING) << "Failed to open namespace for " << de->d_name;
             goto next;
