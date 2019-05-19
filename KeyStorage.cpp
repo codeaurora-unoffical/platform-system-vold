@@ -143,7 +143,7 @@ bool generateWrappedKey(userid_t user_id, KeyType key_type,
     paramBuilder.push_back(param1);
 
     km::KeyParameter param2;
-    if ((key_type == KeyType::DE_USER) || (key_type == KeyType::DE_SYS)) {
+    if ((key_type == KeyType::DE_USER) || (key_type == KeyType::DE_SYS) || (key_type == KeyType::ME)) {
         param2.tag = (km::Tag) (android::hardware::keymaster::V4_0::KM_TAG_KEY_TYPE);
         param2.f.integer = 0;
     } else if (key_type == KeyType::CE_USER) {
@@ -207,33 +207,6 @@ static bool readFileToString(const std::string& filename, std::string* result) {
     return true;
 }
 
-static bool writeStringToFile(const std::string& payload, const std::string& filename) {
-    android::base::unique_fd fd(TEMP_FAILURE_RETRY(
-        open(filename.c_str(), O_WRONLY | O_CREAT | O_NOFOLLOW | O_TRUNC | O_CLOEXEC, 0666)));
-    if (fd == -1) {
-        PLOG(ERROR) << "Failed to open " << filename;
-        return false;
-    }
-    if (!android::base::WriteStringToFd(payload, fd)) {
-        PLOG(ERROR) << "Failed to write to " << filename;
-        unlink(filename.c_str());
-        return false;
-    }
-    // fsync as close won't guarantee flush data
-    // see close(2), fsync(2) and b/68901441
-    if (fsync(fd) == -1) {
-        if (errno == EROFS || errno == EINVAL) {
-            PLOG(WARNING) << "Skip fsync " << filename
-                          << " on a file system does not support synchronization";
-        } else {
-            PLOG(ERROR) << "Failed to fsync " << filename;
-            unlink(filename.c_str());
-            return false;
-        }
-    }
-    return true;
-}
-
 static bool readRandomBytesOrLog(size_t count, std::string* out) {
     auto status = ReadRandomBytes(count, *out);
     if (status != OK) {
@@ -282,6 +255,10 @@ static KeymasterOperation begin(Keymaster& keymaster, const std::string& dir,
         if (!keepOld) {
             if (rename(newKeyPath.c_str(), kmKeyPath.c_str()) != 0) {
                 PLOG(ERROR) << "Unable to move upgraded key to location: " << kmKeyPath;
+                return KeymasterOperation();
+            }
+            if (!android::vold::FsyncDirectory(dir)) {
+                LOG(ERROR) << "Key dir sync failed: " << dir;
                 return KeymasterOperation();
             }
             if (!keymaster.deleteKey(kmKey)) {
