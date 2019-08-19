@@ -1242,7 +1242,6 @@ static int get_dm_crypt_version(int fd, const char *name,  int *version)
     return -1;
 }
 
-#ifndef CONFIG_HW_DISK_ENCRYPTION
 static std::string extra_params_as_string(const std::vector<std::string>& extra_params_vec) {
     if (extra_params_vec.empty()) return "";
     std::string extra_params = std::to_string(extra_params_vec.size());
@@ -1252,10 +1251,8 @@ static std::string extra_params_as_string(const std::vector<std::string>& extra_
     }
     return extra_params;
 }
-#endif
 
 // Only adds parameters if the property is set.
-#ifndef CONFIG_HW_DISK_ENCRYPTION
 static void add_sector_size_param(std::vector<std::string>* extra_params_vec) {
     constexpr char DM_CRYPT_SECTOR_SIZE[] = "ro.crypto.fde_sector_size";
     char sector_size[PROPERTY_VALUE_MAX];
@@ -1269,7 +1266,6 @@ static void add_sector_size_param(std::vector<std::string>* extra_params_vec) {
         extra_params_vec->emplace_back("iv_large_sectors");
     }
 }
-#endif
 
 static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned char* master_key,
                                  const char* real_blk_name, char* crypto_blk_name, const char* name,
@@ -1352,8 +1348,6 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
       load_count = load_crypto_mapping_table(crypt_ftr, master_key, real_blk_name, name, fd,
                                            extra_params_as_string(extra_params_vec).c_str());
     }
-    load_count = load_crypto_mapping_table(crypt_ftr, master_key, real_blk_name, name, fd,
-                                           extra_params);
 #else
     if (!get_dm_crypt_version(fd, name, version)) {
         /* Support for allow_discards was added in version 1.11.0 */
