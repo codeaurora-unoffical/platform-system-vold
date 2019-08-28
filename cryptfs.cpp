@@ -1348,7 +1348,6 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
       load_count = load_crypto_mapping_table(crypt_ftr, master_key, real_blk_name, name, fd,
                                            extra_params_as_string(extra_params_vec).c_str());
     }
-    extra_params_vec.emplace_back(extra_params);
 #else
     if (!get_dm_crypt_version(fd, name, version)) {
         /* Support for allow_discards was added in version 1.11.0 */
@@ -1359,10 +1358,10 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr* crypt_ftr, const unsigned
     if (flags & CREATE_CRYPTO_BLK_DEV_FLAGS_ALLOW_ENCRYPT_OVERRIDE) {
         extra_params_vec.emplace_back("allow_encrypt_override");
     }
-#endif
     add_sector_size_param(&extra_params_vec);
     load_count = load_crypto_mapping_table(crypt_ftr, master_key, real_blk_name, name, fd,
                                            extra_params_as_string(extra_params_vec).c_str());
+#endif
     if (load_count < 0) {
         SLOGE("Cannot load dm-crypt mapping table.\n");
         goto errout;
