@@ -140,7 +140,7 @@ status_t Mount(const std::string& source, const std::string& target, bool ro,
     flags |= (remount ? MS_REMOUNT : 0);
 
     snprintf(mountData, sizeof(mountData),
-            "utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,shortname=mixed",
+            "utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,shortname=mixed,usefree",
             ownerUid, ownerGid, permMask, permMask);
 
     rc = mount(c_source, c_target, "vfat", flags, mountData);
