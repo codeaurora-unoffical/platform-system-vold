@@ -83,6 +83,24 @@ cc_library_static {
     },
 }
 
+cc_library_shared {
+    name: "libvold_binder_shared",
+    defaults: ["vold_default_flags"],
+
+    srcs: [
+        ":vold_aidl",
+    ],
+    shared_libs: [
+        "libbinder",
+        "libutils",
+    ],
+    aidl: {
+        local_include_dirs: ["binder"],
+        include_dirs: ["frameworks/native/aidl/binder"],
+        export_aidl_headers: true,
+    },
+}
+
 cc_library_headers {
     name: "libvold_headers",
     export_include_dirs: ["."],
